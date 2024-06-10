@@ -1,3 +1,4 @@
+
 const cacheName = "cache-v1";
 const dynamicCache = "cache-dynamic-v1";
 const assets = [
@@ -31,38 +32,92 @@ const assets = [
   "/src/assets/images/settings.png",
 ];
 
+
+const limitCacheSize = async (name, size) => {
+  const cache = await caches.open(name);
+  const keys = await cache.keys();
+  while (keys.length > size) {
+    await cache.delete(keys[0]);
+    keys.shift();
+  }
+};
+
 self.addEventListener("install", (evt) => {
-  // console.log('serviceworker installed',evt)
+  console.log('[Service Worker] Install event');
   evt.waitUntil(
     caches.open(cacheName).then((cache) => {
-      // console.log("caching shell assets");
-      cache.addAll(assets);
+      console.log('[Service Worker] Caching static assets');
+      return cache.addAll(assets);
+    }).catch(err => {
+      console.error('[Service Worker] Caching static assets failed', err);
     })
   );
 });
+
 self.addEventListener("activate", (evt) => {
-  // console.log('serviceworker has been activated',evt)
+  console.log('[Service Worker] Activate event');
   evt.waitUntil(
     caches.keys().then((keys) => {
       return Promise.all(
-        keys.filter((key) => key != cacheName).map((key) => caches.delete(key))
+        keys.filter((key) => key !== cacheName && key !== dynamicCache).map((key) => caches.delete(key))
       );
     })
   );
 });
+
 self.addEventListener("fetch", (evt) => {
-  // console.log('fetch event',evt)
-  evt.respondWith(
-    caches.match(evt.request).then((cacheRes) => {
-      return (
-        cacheRes ||
-        fetch(evt.request).then((fetchRes) => {
+  const url = new URL(evt.request.url);
+
+  if (url.pathname.startsWith("/api/")) {
+    // Handle API requests
+    console.log('[Service Worker] Fetching API request from network:', evt.request.url);
+    evt.respondWith(
+      fetch(evt.request).then((fetchRes) => {
+        return caches.open(dynamicCache).then((cache) => {
+          cache.put(evt.request.url, fetchRes.clone());
+          limitCacheSize(dynamicCache, 10);
+          return fetchRes;
+        });
+      }).catch(err => {
+        console.error('[Service Worker] Fetch API request failed', err);
+        // Serve from cache if network fails
+        return caches.match(evt.request).then((cacheRes) => {
+          if (cacheRes) {
+            return cacheRes;
+          } else {
+            // Provide a fallback response if not in cache
+            return new Response(JSON.stringify({ error: "Network error and no cached data available" }), {
+              status: 503,
+              statusText: "Service Unavailable",
+              headers: new Headers({ "Content-Type": "application/json" })
+            });
+          }
+        });
+      })
+    );
+  } else {
+    // Handle requests for static assets
+    evt.respondWith(
+      caches.match(evt.request).then((cacheRes) => {
+        if (cacheRes) {
+          console.log('[Service Worker] Serving from static cache:', evt.request.url);
+          return cacheRes;
+        }
+
+        console.log('[Service Worker] Fetching from network:', evt.request.url);
+        return fetch(evt.request).then((fetchRes) => {
           return caches.open(dynamicCache).then((cache) => {
             cache.put(evt.request.url, fetchRes.clone());
+            limitCacheSize(dynamicCache, 10);
             return fetchRes;
           });
-        })
-      );
-    })
-  );
+        });
+      }).catch(err => {
+        console.error('[Service Worker] Fetch failed', err);
+        if (evt.request.url.endsWith('.html')) {
+          return caches.match('/index.html');
+        }
+      })
+    );
+  }
 });
